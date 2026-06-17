@@ -5,29 +5,30 @@
 # Usage:
 #   ./scripts/build-release.sh [output_dir]
 #
-# The script:
-#   1. Runs `swift build -c release`
-#   2. Copies the binary and mlx.metallib to the output directory
+# Builds via xcodebuild (not swift build) because SwiftPM cannot compile
+# MLX's Metal shaders. Xcode compiles the .metal kernels and bundles the
+# resulting default.metallib inside mlx-swift_Cmlx.bundle, which MLX finds
+# automatically at runtime via the SwiftPM bundle search path.
 #
-# The mlx.metallib is required at runtime — MLX searches for it next to the
-# binary first (see mlx-swift device.cpp load_colocated_library). SwiftPM does
-# not compile Metal shaders, so we source the metallib from the Homebrew mlx
-# formula (which must match the mlx-swift version).
-#
-# Output: <output_dir>/MLXAudioServer and <output_dir>/mlx.metallib
+# Output: <output_dir>/MLXAudioServer + mlx-swift_Cmlx.bundle/
 #
 
 set -euo pipefail
 
 OUTPUT_DIR="${1:-dist}"
-# Resolve the script's directory (parent of scripts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BINARY_NAME="MLXAudioServer"
 
-echo "Building release binary..."
-swift build -c release
+echo "Building release binary with xcodebuild..."
+xcodebuild build \
+    -scheme "${BINARY_NAME}" \
+    -configuration Release \
+    -destination 'platform=macOS' \
+    -derivedDataPath "${SCRIPT_DIR}/.build/xcode" \
+    -quiet \
+    CODE_SIGNING_ALLOWED=NO
 
-BUILD_DIR="${SCRIPT_DIR}/.build/release"
+BUILD_DIR="${SCRIPT_DIR}/.build/xcode/Build/Products/Release"
 BINARY_PATH="${BUILD_DIR}/${BINARY_NAME}"
 
 if [[ ! -f "${BINARY_PATH}" ]]; then
@@ -41,36 +42,12 @@ mkdir -p "${OUTPUT_DIR}"
 echo "Copying binary..."
 cp -f "${BINARY_PATH}" "${OUTPUT_DIR}/${BINARY_NAME}"
 
-# --- metallib ---
-# MLX needs mlx.metallib at runtime. SwiftPM cannot compile Metal shaders.
-# We look for a compatible metallib from the Homebrew mlx formula, or from
-# a previous build's copy.
-METALLIB_SRC=""
-
-# Try Homebrew mlx formula first
-HOMEBREW_METALLIB="/opt/homebrew/lib/mlx.metallib"
-if [[ -f "${HOMEBREW_METALLIB}" ]]; then
-    METALLIB_SRC="${HOMEBREW_METALLIB}"
-fi
-
-# Fallback: check if metallib already exists in the build dir
-if [[ -z "${METALLIB_SRC}" && -f "${BUILD_DIR}/mlx.metallib" ]]; then
-    METALLIB_SRC="${BUILD_DIR}/mlx.metallib"
-fi
-
-if [[ -n "${METALLIB_SRC}" ]]; then
-    echo "Copying mlx.metallib from: ${METALLIB_SRC}"
-    cp -f "${METALLIB_SRC}" "${OUTPUT_DIR}/mlx.metallib"
-else
-    echo "warning: mlx.metallib not found." >&2
-    echo "  The server will fail at runtime with 'Failed to load the default metallib'." >&2
-    echo "  Install the Homebrew mlx formula (brew install mlx) and re-run," >&2
-    echo "  or copy mlx.metallib from a Python mlx installation next to the binary." >&2
-fi
+echo "Copying mlx-swift_Cmlx.bundle (contains compiled Metal shaders)..."
+cp -R "${BUILD_DIR}/mlx-swift_Cmlx.bundle" "${OUTPUT_DIR}/"
 
 echo ""
 echo "Build complete. Output in ${OUTPUT_DIR}/"
-ls -lh "${OUTPUT_DIR}/"
+ls -lhR "${OUTPUT_DIR}/"
 echo ""
 echo "To run:"
 echo "  ${OUTPUT_DIR}/${BINARY_NAME} --model <model-repo> [--host 0.0.0.0] [--port 8000]"

@@ -7,36 +7,46 @@ A single TTS model is loaded at startup and shared across all requests. The serv
 ## Requirements
 
 - macOS 14.0+ on Apple Silicon
-- Xcode Command Line Tools (Swift 6.0+)
-- The `mlx` Homebrew formula (provides the Metal shaders library at runtime — see [Metal Shaders](#metal-shaders))
+- Xcode 16+ (required to compile MLX's Metal shaders)
 
 ## Build
 
+**For development / testing**, use `swift build` (fast iteration, but Metal shaders are not compiled):
+
 ```sh
-swift build -c release
+swift build
 ```
 
-For a distributable bundle (binary + metallib), use the helper script:
+If you run a `swift build` binary, you'll need a `mlx.metallib` next to it (see [Metal Shaders](#metal-shaders)).
+
+**For release / distribution**, use the build script which runs `xcodebuild` to compile Metal shaders and bundle them correctly:
 
 ```sh
 ./scripts/build-release.sh [output_dir]   # default: dist/
 ```
 
+This produces a self-contained binary + `mlx-swift_Cmlx.bundle` (3.6 MB compiled Metal kernels). No external metallib needed.
+
 ## Run
 
 ```sh
-.build/release/MLXAudioServer --model mlx-community/chatterbox-turbo-8bit
+dist/MLXAudioServer --model mlx-community/chatterbox-turbo-8bit
 ```
 
 ### CLI flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model <repo>` | *(required)* | HuggingFace model repo or local path |
+| `--model <repo>` | *(required)* | HuggingFace model repo or **local path** to a model directory |
 | `--host <addr>` | `0.0.0.0` | Bind address |
 | `--port <port>` | `8000` | Listen port |
 
-The model is downloaded from HuggingFace on first run and cached locally.
+The model is downloaded from HuggingFace on first run and cached locally. You can also pass a local filesystem path to avoid re-downloading a model you already have:
+
+```sh
+# Use a model from the standard HuggingFace cache
+dist/MLXAudioServer --model ~/.cache/huggingface/hub/models--mlx-community--Kokoro-82M-4bit/snapshots/<hash>/
+```
 
 ## API
 
@@ -106,38 +116,30 @@ To deploy to another Mac:
    ./scripts/build-release.sh dist/
    ```
 
-2. Copy both files to the target machine:
+2. Copy the binary and bundle to the target machine:
    ```sh
-   scp dist/MLXAudioServer dist/mlx.metallib mac-mini:~/
+   scp -r dist/ mac-mini:~/MLXAudioServer/
    ```
 
 3. Run on the target:
    ```sh
    ssh mac-mini
-   ./MLXAudioServer --model mlx-community/chatterbox-turbo-8bit
+   ~/MLXAudioServer/MLXAudioServer --model mlx-community/chatterbox-turbo-8bit
    ```
 
-The binary is statically linked (no dylib dependencies beyond system frameworks). The `mlx.metallib` must sit next to the binary.
+The binary is statically linked (no dylib dependencies beyond system frameworks). The `mlx-swift_Cmlx.bundle` directory must sit next to the binary — it contains the compiled Metal kernels.
 
 ## Metal Shaders
 
-SwiftPM cannot compile MLX's Metal kernel shaders (`.metal` files) into a `.metallib`. At runtime, MLX searches for `mlx.metallib` in this order:
+SwiftPM cannot compile MLX's Metal kernel shaders (`.metal` files). `xcodebuild` can, and bundles the result as `default.metallib` inside `mlx-swift_Cmlx.bundle`. MLX finds it at runtime via the SwiftPM bundle search path.
 
-1. Next to the executable (colocated)
-2. `<executable_dir>/Resources/mlx.metallib`
-3. SwiftPM resource bundle (`default.metallib`)
-4. `<cwd>/default.metallib`
+The build script (`scripts/build-release.sh`) handles this automatically by using `xcodebuild` instead of `swift build`.
 
-The build script copies the metallib from the Homebrew `mlx` formula (`/opt/homebrew/lib/mlx.metallib`) next to the binary. If the formula isn't installed, install it:
+**If you use `swift build` directly** (for development), you'll need a metallib from another source. The simplest is the Homebrew `mlx` formula:
 
 ```sh
 brew install mlx
-```
-
-Alternatively, you can copy the metallib from a Python `mlx` installation:
-
-```sh
-cp "$(python3 -c 'import mlx, os; print(os.path.dirname(mlx.__file__))')/lib/mlx.metallib" .
+cp /opt/homebrew/lib/mlx.metallib .build/debug/mlx.metallib
 ```
 
 The metallib version should match the `mlx-swift` version used by `mlx-audio-swift`. A version mismatch may cause crashes or incorrect results.
