@@ -258,6 +258,13 @@ struct MLXAudioServer {
 
             // Convert MLXArray to raw float32 PCM bytes.
             let samples = audio.asArray(Float.self)
+
+            // Free GPU memory held by the generated audio and any intermediate
+            // tensors. MLX caches deallocated GPU buffers for reuse, but the
+            // cache grows unbounded by default, causing memory to balloon
+            // across requests (e.g. 11 GB resident after a few short TTS calls).
+            // Clearing after each response keeps the footprint bounded.
+            Memory.clearCache()
             var buffer = ByteBufferAllocator().buffer(capacity: samples.count * MemoryLayout<Float>.size)
             samples.withUnsafeBufferPointer { ptr in
                 _ = buffer.writeBytes(UnsafeRawBufferPointer(ptr))
