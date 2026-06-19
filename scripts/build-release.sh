@@ -26,7 +26,8 @@ xcodebuild build \
     -destination 'platform=macOS' \
     -derivedDataPath "${SCRIPT_DIR}/.build/xcode" \
     -quiet \
-    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_ALLOWED=NO \
+    ENABLE_CODE_COVERAGE=NO
 
 BUILD_DIR="${SCRIPT_DIR}/.build/xcode/Build/Products/Release"
 BINARY_PATH="${BUILD_DIR}/${BINARY_NAME}"
