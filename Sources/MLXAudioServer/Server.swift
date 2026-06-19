@@ -4,6 +4,7 @@ import Hummingbird
 @preconcurrency import MLX
 import MLXAudioCore
 import MLXAudioTTS
+import AVFoundation
 
 // MARK: - Request/Response Types
 
@@ -100,6 +101,82 @@ func parseCLIArgs() -> CLIArgs? {
 
 func printStderr(_ message: String) {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
+}
+
+// MARK: - Audio conversion
+
+/// Converts float32 PCM samples to signed 16-bit little-endian PCM bytes using
+/// `AVAudioConverter`. This delegates the float→int16 scaling, clipping, and
+/// byte ordering to Apple's audio pipeline, matching the reference library's
+/// approach and ensuring correctness across sample rates.
+///
+/// - Parameters:
+///   - samples: Float32 audio samples in the range [-1.0, 1.0].
+///   - sampleRate: The sample rate of the input samples (used to build the format).
+/// - Returns: Raw little-endian Int16 bytes.
+func convertToInt16PCM(_ samples: [Float], sampleRate: Int) -> [UInt8] {
+    guard !samples.isEmpty,
+          let inputFormat = AVAudioFormat(
+              commonFormat: .pcmFormatFloat32,
+              sampleRate: Double(sampleRate),
+              channels: 1,
+              interleaved: false
+          ),
+          let outputFormat = AVAudioFormat(
+              commonFormat: .pcmFormatInt16,
+              sampleRate: Double(sampleRate),
+              channels: 1,
+              interleaved: false
+          ),
+          let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+    else {
+        return []
+    }
+
+    let frameCount = AVAudioFrameCount(samples.count)
+
+    // Build the input buffer from the float32 samples.
+    guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameCount) else {
+        return []
+    }
+    inputBuffer.frameLength = frameCount
+    samples.withUnsafeBufferPointer { ptr in
+        guard let src = ptr.baseAddress else { return }
+        memcpy(inputBuffer.floatChannelData![0], src, samples.count * MemoryLayout<Float>.size)
+    }
+
+    // Allocate the output buffer (same frame count; Int16 is just fewer bytes per frame).
+    guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
+        return []
+    }
+
+    // The converter callback is invoked repeatedly until it returns .endOfStream.
+    // We supply the input buffer once, then signal end of stream.
+    var consumedInput = false
+    var error: NSError?
+    let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+        if consumedInput {
+            outStatus.pointee = .endOfStream
+            return nil
+        }
+        consumedInput = true
+        outStatus.pointee = .haveData
+        return inputBuffer
+    }
+
+    guard status != .error, error == nil, outputBuffer.frameLength > 0 else {
+        return []
+    }
+
+    // Extract raw Int16 bytes (native-endian = little-endian on Apple Silicon).
+    let int16Count = Int(outputBuffer.frameLength)
+    var bytes = [UInt8](repeating: 0, count: int16Count * MemoryLayout<Int16>.size)
+    bytes.withUnsafeMutableBufferPointer { dest in
+        outputBuffer.int16ChannelData?[0].withMemoryRebound(to: UInt8.self, capacity: dest.count) { src in
+            dest.baseAddress?.update(from: src, count: dest.count)
+        }
+    }
+    return bytes
 }
 
 // MARK: - Cache workaround
@@ -256,7 +333,10 @@ struct MLXAudioServer {
                 )
             }
 
-            // Convert MLXArray to raw float32 PCM bytes.
+            // Convert float32 samples to signed 16-bit PCM (little-endian) via
+            // AVAudioConverter. This delegates scaling, clipping, and byte
+            // ordering to Apple's audio pipeline, matching the reference
+            // library's approach.
             let samples = audio.asArray(Float.self)
 
             // Free GPU memory held by the generated audio and any intermediate
@@ -265,15 +345,13 @@ struct MLXAudioServer {
             // across requests (e.g. 11 GB resident after a few short TTS calls).
             // Clearing after each response keeps the footprint bounded.
             Memory.clearCache()
-            var buffer = ByteBufferAllocator().buffer(capacity: samples.count * MemoryLayout<Float>.size)
-            samples.withUnsafeBufferPointer { ptr in
-                _ = buffer.writeBytes(UnsafeRawBufferPointer(ptr))
-            }
+
+            let int16Bytes = convertToInt16PCM(samples, sampleRate: model.sampleRate)
 
             return Response(
                 status: .ok,
                 headers: [.contentType: "audio/pcm"],
-                body: .init(byteBuffer: buffer)
+                body: .init(byteBuffer: ByteBuffer(bytes: int16Bytes))
             )
         }
 
